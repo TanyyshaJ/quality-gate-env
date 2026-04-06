@@ -1,16 +1,5 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
-"""
-Quality Gate Env Environment Implementation.
-
-A simple test environment that echoes back messages sent to it.
-Perfect for testing HTTP server infrastructure.
-"""
-
+import json
+import os
 from uuid import uuid4
 
 from openenv.core.env_server.interfaces import Environment
@@ -23,82 +12,129 @@ except ImportError:
 
 
 class QualityGateEnvironment(Environment):
-    """
-    A simple echo environment that echoes back messages.
 
-    This environment is designed for testing the HTTP server infrastructure.
-    It maintains minimal state and simply echoes back whatever message it receives.
-
-    Example:
-        >>> env = QualityGateEnvironment()
-        >>> obs = env.reset()
-        >>> print(obs.echoed_message)  # "Quality Gate Env environment ready!"
-        >>>
-        >>> obs = env.step(QualityGateAction(message="Hello"))
-        >>> print(obs.echoed_message)  # "Hello"
-        >>> print(obs.message_length)  # 5
-    """
-
-    # Enable concurrent WebSocket sessions.
-    # Set to True if your environment isolates state between instances.
-    # When True, multiple WebSocket clients can connect simultaneously, each
-    # getting their own environment instance (when using factory mode in app.py).
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
 
     def __init__(self):
-        """Initialize the quality_gate_env environment."""
         self._state = State(episode_id=str(uuid4()), step_count=0)
-        self._reset_count = 0
+        self._task_data = None
+        self._index = 0
+        self._budget_used = 0
+        self._total_score = 0.0
+        self._done = False
+        self._task_id = ""
 
-    def reset(self) -> QualityGateObservation:
-        """
-        Reset the environment.
-
-        Returns:
-            QualityGateObservation with a ready message
-        """
+    def reset(self, task_id: str = "easy_001") -> QualityGateObservation:
+        self._task_data = self._load(task_id)
+        self._index = 0
+        self._budget_used = 0
+        self._total_score = 0.0
+        self._done = False
+        self._task_id = task_id
         self._state = State(episode_id=str(uuid4()), step_count=0)
-        self._reset_count += 1
+        return self._observe(reward=0.0, feedback="Episode started. Review the outputs carefully.")
 
-        return QualityGateObservation(
-            echoed_message="Quality Gate Env environment ready!",
-            message_length=0,
-            done=False,
-            reward=0.0,
-        )
+    def step(self, action: QualityGateAction) -> QualityGateObservation:
+        if self._done:
+            return self._observe(reward=0.0, feedback="Episode already finished.")
 
-    def step(self, action: QualityGateAction) -> QualityGateObservation:  # type: ignore[override]
-        """
-        Execute a step in the environment by echoing the message.
+        outputs = self._task_data["outputs"]
+        current = outputs[self._index]
 
-        Args:
-            action: QualityGateAction containing the message to echo
+        reward, feedback = self._grade(action, current)
 
-        Returns:
-            QualityGateObservation with the echoed message and its length
-        """
+        if action.action_type == "deep_verify":
+            self._budget_used += 1
+
+        self._total_score += reward
         self._state.step_count += 1
+        self._index += 1
 
-        message = action.message
-        length = len(message)
+        if self._index >= len(outputs):
+            self._done = True
 
-        # Simple reward: longer messages get higher rewards
-        reward = length * 0.1
-
-        return QualityGateObservation(
-            echoed_message=message,
-            message_length=length,
-            done=False,
-            reward=reward,
-            metadata={"original_message": message, "step": self._state.step_count},
-        )
+        return self._observe(reward=round(reward, 3), feedback=feedback)
 
     @property
     def state(self) -> State:
-        """
-        Get the current environment state.
-
-        Returns:
-            Current State with episode_id and step_count
-        """
         return self._state
+
+    def _load(self, task_id: str) -> dict:
+        difficulty = task_id.split("_")[0]
+        path = os.path.join(os.path.dirname(__file__), f"../data/{difficulty}.json")
+        with open(path) as f:
+            return json.load(f)
+
+    def _grade(self, action: QualityGateAction, output: dict):
+        score = 0.0
+        correct = output["ground_truth"]
+        risk = output["risk_signal"]
+
+        if correct == "bad":
+            scores = {
+                "reject": 0.4,
+                "deep_verify": 0.3,
+                "flag_human": 0.2,
+                "sample_check": 0.1,
+                "fast_pass": -0.4
+            }
+        else:
+            scores = {
+                "fast_pass": 0.4,
+                "sample_check": 0.3,
+                "deep_verify": 0.1,
+                "flag_human": 0.1,
+                "reject": -0.2
+            }
+
+        score += scores.get(action.action_type, 0.0)
+
+        # Bonus: agent gave a real reason
+        if len(action.reason) > 15:
+            score += 0.2
+
+        # Bonus: risk signal alignment
+        if risk == "high" and action.action_type in ["deep_verify", "reject", "flag_human"]:
+            score += 0.2
+        elif risk == "low" and action.action_type == "fast_pass":
+            score += 0.2
+
+        # Bonus: budget not exhausted
+        budget_total = self._task_data.get("budget", 3)
+        if self._budget_used < budget_total:
+            score += 0.1
+
+        feedback = (
+            f"Output '{output['id']}' was {correct} | "
+            f"risk: {risk} | "
+            f"you chose: {action.action_type} | "
+            f"score: {round(max(0.0, min(1.0, score)), 3)}"
+        )
+
+        return max(0.0, min(1.0, score)), feedback
+
+    def _observe(self, reward: float, feedback: str) -> QualityGateObservation:
+        outputs = self._task_data["outputs"] if self._task_data else []
+        budget_total = self._task_data.get("budget", 3) if self._task_data else 3
+
+        # Show agent next 3 outputs but strip ground_truth
+        visible = outputs[self._index:self._index + 3]
+        safe = [
+            {
+                "id": o["id"],
+                "content": o["content"],
+                "type": o["type"],
+                "risk_signal": o["risk_signal"]
+            }
+            for o in visible
+        ]
+
+        return QualityGateObservation(
+            task_id=self._task_id,
+            outputs_to_review=safe,
+            budget_remaining=budget_total - self._budget_used,
+            step=self._state.step_count,
+            reward=reward,
+            done=self._done,
+            feedback=feedback
+        )

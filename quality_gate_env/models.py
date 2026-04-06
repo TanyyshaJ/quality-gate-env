@@ -1,27 +1,20 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
-"""
-Data models for the Quality Gate Env Environment.
-
-The quality_gate_env environment is a simple test environment that echoes back messages.
-"""
-
 from openenv.core.env_server.types import Action, Observation
 from pydantic import Field
-
+from typing import List, Optional
 
 class QualityGateAction(Action):
-    """Action for the Quality Gate Env environment - just a message to echo."""
-
-    message: str = Field(..., description="Message to echo back")
+    """Agent's decision on one AI output."""
+    output_id: str = Field(..., description="ID of the output being reviewed")
+    action_type: str = Field(..., description="One of: fast_pass, deep_verify, reject, flag_human, sample_check")
+    reason: str = Field(..., description="Agent's reasoning for this decision")
 
 
 class QualityGateObservation(Observation):
-    """Observation from the Quality Gate Env environment - the echoed message."""
-
-    echoed_message: str = Field(default="", description="The echoed message")
-    message_length: int = Field(default=0, description="Length of the echoed message")
+    """What the agent sees at each step."""
+    task_id: str = Field(default="", description="Current task ID")
+    outputs_to_review: List[dict] = Field(default_factory=list, description="AI outputs visible to agent")
+    budget_remaining: int = Field(default=0, description="Deep verify budget remaining")
+    step: int = Field(default=0, description="Current step number")
+    reward: float = Field(default=0.0, description="Reward from last action")
+    done: bool = Field(default=False, description="Whether episode is complete")
+    feedback: str = Field(default="", description="Feedback on last action")
