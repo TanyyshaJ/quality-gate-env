@@ -1,4 +1,4 @@
-# quality-gate-env
+# Quality Gate Env
 
 Hackathon submission for an OpenEnv-based AI output quality gate.
 
