@@ -1,25 +1,28 @@
 ﻿# quality-gate-env
 
-OpenEnv hackathon submission: an AI output quality-gate environment with constrained review budget.
+OpenEnv hackathon submission for an AI output quality-gate environment with limited review budget.
 
-## What This Project Does
+## Overview
 
-The environment simulates production quality control for AI-generated outputs.  
-At each step, an agent chooses one action for an output:
+This environment simulates a production quality-control layer for AI-generated outputs. At each step, an agent receives candidate outputs and must choose one action:
 
 - `fast_pass`
-- `deep_verify` (costs budget)
+- `deep_verify` (uses budget)
 - `reject`
 - `flag_human`
 - `sample_check`
 
-Three tasks are included:
+The goal is to maximize reward by balancing correctness and budget usage.
 
-- `easy_001` (5 outputs, budget 3)
-- `medium_001` (10 outputs, budget 4)
-- `hard_001` (15 outputs, budget 3)
+## Tasks
 
-## Repository Layout
+| Task ID | Difficulty | Outputs | Budget |
+|---|---|---:|---:|
+| `easy_001` | Easy | 5 | 3 |
+| `medium_001` | Medium | 10 | 4 |
+| `hard_001` | Hard | 15 | 3 |
+
+## Repository Structure
 
 ```text
 quality-gate-env/
@@ -41,30 +44,24 @@ quality-gate-env/
         └── Dockerfile
 ```
 
-## Prerequisites
+## Quick Start
 
-- Python 3.10+
-- Docker Desktop (for container build/run)
-- Hugging Face account + token
-- `openenv-core` installed
-
-## Setup
+1. Install dependencies.
 
 ```bash
 cd quality_gate_env
 pip install -e .
 ```
 
-## Local Validation
+2. Validate environment structure.
 
 ```bash
-cd quality_gate_env
 openenv validate --verbose
 ```
 
-Expected: `[OK] ... Ready for multi-mode deployment`
+Expected output includes: `[OK] ... Ready for multi-mode deployment`
 
-## Run Locally (Without Docker)
+## Run Locally (No Docker)
 
 Terminal 1:
 
@@ -88,7 +85,18 @@ docker build -t quality-gate-env:latest -f server/Dockerfile .
 docker run --rm -p 8000:8000 quality-gate-env:latest
 ```
 
+## API Endpoints
+
+| Method | Route | Purpose |
+|---|---|---|
+| `GET` | `/health` | Service health check |
+| `POST` | `/reset` | Start a new episode |
+| `POST` | `/step` | Apply one action |
+| `GET` | `/state` | Read current episode state |
+
 ## Deploy to Hugging Face Spaces
+
+Run from the environment root (the folder that contains `openenv.yaml`):
 
 ```bash
 cd quality_gate_env
@@ -100,9 +108,9 @@ Live URL format:
 
 `https://<your-hf-username>-quality-gate-env.hf.space`
 
-## Run Inference
+## End-to-End Evaluation
 
-Use local/live server:
+Run inference against a running local or hosted server:
 
 ```bash
 set ENV_BASE_URL=http://localhost:8000
@@ -110,7 +118,7 @@ set HF_TOKEN=<your_hf_token>
 python inference.py
 ```
 
-Or rely on Docker image startup from `inference.py`:
+Alternative mode (Docker image launch from script):
 
 ```bash
 set HF_TOKEN=<your_hf_token>
@@ -124,9 +132,24 @@ Expected logs per task:
 - `[STEP]`
 - `[END]`
 
+## Common Issues
+
+1. `Not an OpenEnv environment directory` when running `openenv push`.
+Run `openenv push` from `quality_gate_env/`, not repo root.
+
+2. `Docker is not available` in `inference.py`.
+Either start Docker Desktop or set `ENV_BASE_URL` to an already running server.
+
+3. `Connection refused` to `ws://localhost:8000/ws`.
+Server is not running on port `8000`; start it first and verify `/health`.
+
+4. `Unsupported task_id ... data file not found`.
+Rebuild image after latest code changes using `--no-cache`.
+
 ## Submission Checklist
 
-- GitHub repo pushed with latest code
-- HF Space is `Running`
-- `/health`, `/reset`, `/step`, `/state` work on HF Space
-- `inference.py` completes all 3 tasks successfully
+- [ ] GitHub repo has latest code and README
+- [ ] Hugging Face Space is `Running`
+- [ ] `/health`, `/reset`, `/step`, `/state` are working on live URL
+- [ ] `python inference.py` completes all 3 tasks with `[START]/[STEP]/[END]` logs
+- [ ] Repo URL + Space URL ready for dashboard submission
