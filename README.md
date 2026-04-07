@@ -1,9 +1,4 @@
-<<<<<<< HEAD
-﻿# quality-gate-env
-=======
 # Quality Gate Env
->>>>>>> a9e29bbf18743740e0c60165ce3ab6504d1adf40
-
 OpenEnv hackathon submission for an AI output quality-gate environment with limited review budget.
 
 ## Overview
