@@ -43,3 +43,6 @@ server = "quality_gate_env.server.app:main"
 include-package-data = true
 packages = ["quality_gate_env", "quality_gate_env.server"]
 package-dir = { "quality_gate_env" = ".", "quality_gate_env.server" = "server" }
+
+[tool.setuptools.package-data]
+quality_gate_env = ["data/*.json"]

@@ -31,6 +31,10 @@ COPY . /app/env
 # For standalone builds, openenv will be installed via pyproject.toml
 WORKDIR /app/env
 
+# Guard against accidentally copied host virtualenvs (e.g. Windows .venv),
+# which are invalid inside Linux containers.
+RUN rm -rf /app/env/.venv
+
 # Ensure uv is available (for local builds where base image lacks it)
 RUN if ! command -v uv >/dev/null 2>&1; then \
         curl -LsSf https://astral.sh/uv/install.sh | sh && \

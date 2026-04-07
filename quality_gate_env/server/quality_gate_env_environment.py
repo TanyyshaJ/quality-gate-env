@@ -1,5 +1,7 @@
 import json
 import os
+from importlib import resources
+from pathlib import Path
 from uuid import uuid4
 
 from openenv.core.env_server.interfaces import Environment
@@ -70,12 +72,43 @@ class QualityGateEnvironment(Environment):
         return self._state
 
     def _load(self, task_id: str) -> dict:
-        difficulty = task_id.split("_")[0]
-        path = os.path.join(os.path.dirname(__file__), f"../data/{difficulty}.json")
-        if not os.path.exists(path):
+        task_id = (task_id or "").strip().lower()
+        difficulty = task_id.split("_")[0] if task_id else ""
+        if difficulty not in {"easy", "medium", "hard"}:
             raise ValueError(f"Unsupported task_id '{task_id}'. Expected easy_*, medium_*, or hard_*.")
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
+
+        filename = f"{difficulty}.json"
+        base_dir = Path(__file__).resolve()
+        env_data_dir = os.getenv("QUALITY_GATE_DATA_DIR", "").strip()
+        candidate_paths = [
+            base_dir.parent.parent / "data" / filename,  # quality_gate_env/data
+            base_dir.parent / "data" / filename,  # server/data (fallback)
+            Path("/app/env/data") / filename,  # docker source tree
+            Path.cwd() / "quality_gate_env" / "data" / filename,  # repo root execution
+            Path.cwd() / "data" / filename,  # env root execution
+        ]
+        if env_data_dir:
+            candidate_paths.insert(0, Path(env_data_dir) / filename)
+
+        for path in candidate_paths:
+            if path.exists():
+                with path.open(encoding="utf-8") as f:
+                    return json.load(f)
+
+        # Package-resource fallback for installed environments.
+        try:
+            data_resource = resources.files("quality_gate_env").joinpath("data", filename)
+            if data_resource.is_file():
+                with data_resource.open("r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception:
+            pass
+
+        searched = ", ".join(str(p) for p in candidate_paths)
+        raise ValueError(
+            f"Unsupported task_id '{task_id}'. Expected easy_*, medium_*, or hard_*. "
+            f"Data file '{filename}' not found. Searched: {searched}"
+        )
 
     def _grade(self, action: QualityGateAction, output: dict):
         score = 0.0

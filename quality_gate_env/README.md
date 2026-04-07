@@ -1,6 +1,5 @@
 ---
 title: Quality Gate Environment
-emoji: ":white_check_mark:"
 colorFrom: blue
 colorTo: green
 sdk: docker
