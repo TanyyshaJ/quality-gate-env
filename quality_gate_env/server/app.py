@@ -38,7 +38,7 @@ except Exception as e:  # pragma: no cover
 try:
     from ..models import QualityGateAction, QualityGateObservation
     from .quality_gate_env_environment import QualityGateEnvironment
-except ModuleNotFoundError:
+except (ModuleNotFoundError, ImportError):
     from models import QualityGateAction, QualityGateObservation
     from server.quality_gate_env_environment import QualityGateEnvironment
 
@@ -76,9 +76,4 @@ def main(host: str = "0.0.0.0", port: int = 8000):
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=8000)
-    args = parser.parse_args()
-    main(port=args.port)
+    main()

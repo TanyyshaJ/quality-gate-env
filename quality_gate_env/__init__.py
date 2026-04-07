@@ -7,10 +7,11 @@
 """Quality Gate Env Environment."""
 
 from .client import QualityGateEnv
-from .models import QualityGateAction, QualityGateObservation
+from .models import QualityGateAction, QualityGateObservation, QualityGateState
 
 __all__ = [
     "QualityGateAction",
     "QualityGateObservation",
+    "QualityGateState",
     "QualityGateEnv",
 ]

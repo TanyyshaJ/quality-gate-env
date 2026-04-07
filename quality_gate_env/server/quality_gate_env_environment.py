@@ -3,12 +3,11 @@ import os
 from uuid import uuid4
 
 from openenv.core.env_server.interfaces import Environment
-from openenv.core.env_server.types import State
 
 try:
-    from ..models import QualityGateAction, QualityGateObservation
+    from ..models import QualityGateAction, QualityGateObservation, QualityGateState
 except ImportError:
-    from models import QualityGateAction, QualityGateObservation
+    from models import QualityGateAction, QualityGateObservation, QualityGateState
 
 
 class QualityGateEnvironment(Environment):
@@ -16,7 +15,7 @@ class QualityGateEnvironment(Environment):
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
 
     def __init__(self):
-        self._state = State(episode_id=str(uuid4()), step_count=0)
+        self._state = QualityGateState(episode_id=str(uuid4()), step_count=0)
         self._task_data = None
         self._index = 0
         self._budget_used = 0
@@ -31,7 +30,14 @@ class QualityGateEnvironment(Environment):
         self._total_score = 0.0
         self._done = False
         self._task_id = task_id
-        self._state = State(episode_id=str(uuid4()), step_count=0)
+        self._state = QualityGateState(
+            episode_id=str(uuid4()),
+            step_count=0,
+            task_id=task_id,
+            budget_used=0,
+            total_score=0.0,
+            done=False,
+        )
         return self._observe(reward=0.0, feedback="Episode started. Review the outputs carefully.")
 
     def step(self, action: QualityGateAction) -> QualityGateObservation:
@@ -52,17 +58,23 @@ class QualityGateEnvironment(Environment):
 
         if self._index >= len(outputs):
             self._done = True
+        self._state.task_id = self._task_id
+        self._state.budget_used = self._budget_used
+        self._state.total_score = round(self._total_score, 3)
+        self._state.done = self._done
 
         return self._observe(reward=round(reward, 3), feedback=feedback)
 
     @property
-    def state(self) -> State:
+    def state(self) -> QualityGateState:
         return self._state
 
     def _load(self, task_id: str) -> dict:
         difficulty = task_id.split("_")[0]
         path = os.path.join(os.path.dirname(__file__), f"../data/{difficulty}.json")
-        with open(path) as f:
+        if not os.path.exists(path):
+            raise ValueError(f"Unsupported task_id '{task_id}'. Expected easy_*, medium_*, or hard_*.")
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
 
     def _grade(self, action: QualityGateAction, output: dict):
@@ -132,7 +144,7 @@ class QualityGateEnvironment(Environment):
         return QualityGateObservation(
             task_id=self._task_id,
             outputs_to_review=safe,
-            budget_remaining=budget_total - self._budget_used,
+            budget_remaining=max(0, budget_total - self._budget_used),
             step=self._state.step_count,
             reward=reward,
             done=self._done,

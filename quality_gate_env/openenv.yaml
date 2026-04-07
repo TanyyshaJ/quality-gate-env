@@ -1,7 +1,17 @@
 spec_version: 1
-name: quality_gate_env
+name: quality-gate-env
 type: space
 runtime: fastapi
 app: server.app:app
 port: 8000
-
+description: AI output quality-gate environment with constrained verification budget
+tasks:
+  - id: easy_001
+    difficulty: easy
+    description: 5 outputs, clear risk signals, budget 3
+  - id: medium_001
+    difficulty: medium
+    description: 10 outputs, mixed/adversarial risk signals, budget 4
+  - id: hard_001
+    difficulty: hard
+    description: 15 outputs, adversarial-heavy signals, budget 3
