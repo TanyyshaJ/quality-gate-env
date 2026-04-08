@@ -14,9 +14,9 @@ from quality_gate_env import QualityGateAction, QualityGateEnv  # noqa: E402
 
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
-IMAGE_NAME = os.getenv("IMAGE_NAME", "quality-gate-env:latest")
+HF_TOKEN = os.getenv("HF_TOKEN")
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 ENV_BASE_URL = os.getenv("ENV_BASE_URL")
 BENCHMARK = "quality-gate-v1"
 TASK_IDS = ["easy_001", "medium_001", "hard_001"]
@@ -109,15 +109,16 @@ Respond with JSON only:
             action_type=parsed["action_type"],
             reason=parsed.get("reason", "no reason"),
         )
-    except Exception as exc:  # pragma: no cover
-        print(f"[DEBUG] model action fallback: {exc}", flush=True)
+    except Exception:  # pragma: no cover
         return _fallback_action(observation)
 
 
 async def _create_env_client() -> QualityGateEnv:
     if ENV_BASE_URL:
         return QualityGateEnv(base_url=ENV_BASE_URL)
-    return await QualityGateEnv.from_docker_image(IMAGE_NAME)
+    if LOCAL_IMAGE_NAME:
+        return await QualityGateEnv.from_docker_image(LOCAL_IMAGE_NAME)
+    raise RuntimeError("Set ENV_BASE_URL or LOCAL_IMAGE_NAME before running inference.py")
 
 
 async def run_task(client: OpenAI, task_id: str) -> float:
@@ -160,13 +161,12 @@ async def run_task(client: OpenAI, task_id: str) -> float:
 
 
 async def main() -> None:
-    if not API_KEY:
-        raise RuntimeError("Set HF_TOKEN or API_KEY before running inference.py")
+    if not HF_TOKEN:
+        raise RuntimeError("Set HF_TOKEN before running inference.py")
 
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
     for task_id in TASK_IDS:
-        score = await run_task(client, task_id)
-        print(f"Final score for {task_id}: {score:.3f}", flush=True)
+        await run_task(client, task_id)
 
 
 if __name__ == "__main__":
