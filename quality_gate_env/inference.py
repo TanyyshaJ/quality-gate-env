@@ -29,29 +29,22 @@ VALID_ACTIONS = {"fast_pass", "deep_verify", "reject", "flag_human", "sample_che
 
 
 def log_start(task: str, env: str, model: str) -> None:
-    print(json.dumps({"type": "[START]", "task": task, "env": env, "model": model}), flush=True)
+    print(f"[START] task={task} env={env} model={model}", flush=True)
 
 
 def log_step(step: int, action: dict[str, Any], reward: float, done: bool) -> None:
+    output_id = action.get("output_id", "unknown")
+    action_type = action.get("action_type", "unknown")
     print(
-        json.dumps(
-            {"type": "[STEP]", "step": step, "action": action, "reward": round(reward, 3), "done": done}
-        ),
+        f"[STEP] step={step} reward={round(reward, 3)} done={str(done).lower()} "
+        f"action={action_type} output_id={output_id}",
         flush=True,
     )
 
 
 def log_end(task: str, total_reward: float, success: bool, steps: int) -> None:
     print(
-        json.dumps(
-            {
-                "type": "[END]",
-                "task": task,
-                "total_reward": round(total_reward, 3),
-                "success": success,
-                "steps": steps,
-            }
-        ),
+        f"[END] task={task} score={round(total_reward, 3)} steps={steps} success={str(success).lower()}",
         flush=True,
     )
 
@@ -162,10 +155,12 @@ async def run_task(client: Optional[OpenAI], task_id: str) -> float:
     total_reward = 0.0
     steps = 0
     history: list[str] = []
+    emitted_step = False
 
     try:
         env_client = await _create_env_client()
     except Exception:
+        log_step(step=0, action={"output_id": "none", "action_type": "fallback"}, reward=0.0, done=True)
         log_end(task=task_id, total_reward=0.0, success=False, steps=0)
         return 0.0
 
@@ -175,6 +170,7 @@ async def run_task(client: Optional[OpenAI], task_id: str) -> float:
                 result = await env.reset(task_id=task_id)
                 observation = result.observation
             except Exception:
+                log_step(step=0, action={"output_id": "none", "action_type": "fallback"}, reward=0.0, done=True)
                 log_end(task=task_id, total_reward=0.0, success=False, steps=0)
                 return 0.0
 
@@ -207,10 +203,14 @@ async def run_task(client: Optional[OpenAI], task_id: str) -> float:
                     reward=reward,
                     done=done,
                 )
+                emitted_step = True
                 history.append(f"step={step} action={action.action_type} reward={reward:.3f}")
 
     except Exception:
         pass
+
+    if not emitted_step:
+        log_step(step=0, action={"output_id": "none", "action_type": "fallback"}, reward=0.0, done=True)
 
     success = total_reward >= 0.5
     log_end(task=task_id, total_reward=total_reward, success=success, steps=steps)
