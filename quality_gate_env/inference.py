@@ -1,8 +1,8 @@
-import asyncio
+﻿import asyncio
 import json
 import os
 import sys
-from typing import Any
+from typing import Any, Optional
 
 from openai import OpenAI
 
@@ -10,17 +10,22 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from quality_gate_env import QualityGateAction, QualityGateEnv  # noqa: E402
+try:
+    from quality_gate_env.models import QualityGateAction  # noqa: E402
+    from quality_gate_env.client import QualityGateEnv  # noqa: E402
+except ImportError:
+    from quality_gate_env import QualityGateAction, QualityGateEnv  # noqa: E402
 
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
 HF_TOKEN = os.getenv("HF_TOKEN")
-LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME") or os.getenv("IMAGE_NAME")
 ENV_BASE_URL = os.getenv("ENV_BASE_URL")
 BENCHMARK = "quality-gate-v1"
 TASK_IDS = ["easy_001", "medium_001", "hard_001"]
 MAX_STEPS = int(os.getenv("MAX_STEPS", "25"))
+VALID_ACTIONS = {"fast_pass", "deep_verify", "reject", "flag_human", "sample_check"}
 
 
 def log_start(task: str, env: str, model: str) -> None:
@@ -74,7 +79,27 @@ def _fallback_action(observation: Any) -> QualityGateAction:
     return QualityGateAction(output_id=first["id"], action_type=action_type, reason="fallback policy")
 
 
-def get_model_action(client: OpenAI, observation: Any, history: list[str]) -> QualityGateAction:
+def _sanitize_model_action(parsed: dict[str, Any], observation: Any) -> QualityGateAction:
+    fallback = _fallback_action(observation)
+    output_id = str(parsed.get("output_id") or fallback.output_id)
+    action_type = str(parsed.get("action_type") or fallback.action_type)
+    reason = str(parsed.get("reason") or "model response")
+
+    if action_type not in VALID_ACTIONS:
+        action_type = fallback.action_type
+        reason = "invalid model action, fallback"
+
+    if action_type == "deep_verify" and observation.budget_remaining <= 0:
+        action_type = "sample_check"
+        reason = "budget exhausted"
+
+    return QualityGateAction(output_id=output_id, action_type=action_type, reason=reason)
+
+
+def get_model_action(client: Optional[OpenAI], observation: Any, history: list[str]) -> QualityGateAction:
+    if client is None:
+        return _fallback_action(observation)
+
     outputs_text = json.dumps(observation.outputs_to_review, indent=2)
     prompt = f"""You are a quality gate agent for AI-generated outputs.
 
@@ -101,59 +126,91 @@ Respond with JSON only:
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=180,
+            timeout=30,
         )
         text = (response.choices[0].message.content or "").strip()
         parsed = _safe_json_parse(text)
-        return QualityGateAction(
-            output_id=parsed["output_id"],
-            action_type=parsed["action_type"],
-            reason=parsed.get("reason", "no reason"),
-        )
-    except Exception:  # pragma: no cover
+        return _sanitize_model_action(parsed, observation)
+    except Exception:
         return _fallback_action(observation)
 
 
 async def _create_env_client() -> QualityGateEnv:
     if ENV_BASE_URL:
         return QualityGateEnv(base_url=ENV_BASE_URL)
+
+    image_candidates = []
     if LOCAL_IMAGE_NAME:
-        return await QualityGateEnv.from_docker_image(LOCAL_IMAGE_NAME)
-    raise RuntimeError("Set ENV_BASE_URL or LOCAL_IMAGE_NAME before running inference.py")
+        image_candidates.append(LOCAL_IMAGE_NAME)
+    image_candidates.extend([
+        "quality-gate-env:latest",
+        "openenv-quality_gate:latest",
+        "openenv-quality_gate",
+    ])
+
+    for image in image_candidates:
+        try:
+            return await QualityGateEnv.from_docker_image(image)
+        except Exception:
+            continue
+
+    raise RuntimeError("Could not create env client from ENV_BASE_URL or docker image")
 
 
-async def run_task(client: OpenAI, task_id: str) -> float:
+async def run_task(client: Optional[OpenAI], task_id: str) -> float:
     log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
     total_reward = 0.0
     steps = 0
     history: list[str] = []
 
-    env_client = await _create_env_client()
-    async with env_client as env:
-        result = await env.reset(task_id=task_id)
-        observation = result.observation
+    try:
+        env_client = await _create_env_client()
+    except Exception:
+        log_end(task=task_id, total_reward=0.0, success=False, steps=0)
+        return 0.0
 
-        for step in range(1, MAX_STEPS + 1):
-            if result.done or observation.done:
-                break
+    try:
+        async with env_client as env:
+            try:
+                result = await env.reset(task_id=task_id)
+                observation = result.observation
+            except Exception:
+                log_end(task=task_id, total_reward=0.0, success=False, steps=0)
+                return 0.0
 
-            action = get_model_action(client, observation, history)
-            result = await env.step(action)
-            observation = result.observation
-            reward = float(result.reward if result.reward is not None else observation.reward)
+            for step in range(1, MAX_STEPS + 1):
+                if getattr(result, "done", False) or observation.done:
+                    break
 
-            total_reward += reward
-            steps += 1
-            log_step(
-                step=step,
-                action={
-                    "output_id": action.output_id,
-                    "action_type": action.action_type,
-                    "reason": action.reason,
-                },
-                reward=reward,
-                done=observation.done,
-            )
-            history.append(f"step={step} action={action.action_type} reward={reward:.3f}")
+                action = _fallback_action(observation)
+                reward = 0.0
+                done = bool(getattr(observation, "done", False))
+
+                try:
+                    action = get_model_action(client, observation, history)
+                    result = await env.step(action)
+                    observation = result.observation
+                    reward = float(result.reward if result.reward is not None else 0.0)
+                    done = bool(observation.done)
+                except Exception:
+                    done = bool(getattr(observation, "done", False))
+
+                total_reward += reward
+                steps += 1
+                log_step(
+                    step=step,
+                    action={
+                        "output_id": action.output_id,
+                        "action_type": action.action_type,
+                        "reason": action.reason,
+                    },
+                    reward=reward,
+                    done=done,
+                )
+                history.append(f"step={step} action={action.action_type} reward={reward:.3f}")
+
+    except Exception:
+        pass
 
     success = total_reward >= 0.5
     log_end(task=task_id, total_reward=total_reward, success=success, steps=steps)
@@ -161,13 +218,23 @@ async def run_task(client: OpenAI, task_id: str) -> float:
 
 
 async def main() -> None:
-    if not HF_TOKEN:
-        raise RuntimeError("Set HF_TOKEN before running inference.py")
+    client: Optional[OpenAI] = None
+    if HF_TOKEN:
+        try:
+            client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+        except Exception:
+            client = None
 
-    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
     for task_id in TASK_IDS:
         await run_task(client, task_id)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception:
+        # Last-resort safety: never crash with an unhandled exception.
+        for task_id in TASK_IDS:
+            log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
+            log_end(task=task_id, total_reward=0.0, success=False, steps=0)
+        sys.exit(0)
