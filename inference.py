@@ -43,10 +43,23 @@ def log_step(step: int, action: dict[str, Any], reward: float, done: bool) -> No
 
 
 def log_end(task: str, total_reward: float, success: bool, steps: int) -> None:
+    score = _normalized_score(total_reward=total_reward, steps=steps)
     print(
-        f"[END] task={task} score={round(total_reward, 3)} steps={steps} success={str(success).lower()}",
+        f"[END] task={task} score={score} steps={steps} success={str(success).lower()}",
         flush=True,
     )
+
+
+def _normalized_score(total_reward: float, steps: int) -> float:
+    # Validator requires strict (0, 1), never exactly 0.0 or 1.0.
+    if steps <= 0:
+        return 0.5
+    score = total_reward / steps
+    if score <= 0.0:
+        return 0.001
+    if score >= 1.0:
+        return 0.999
+    return round(score, 3)
 
 
 def _safe_json_parse(raw: str) -> dict[str, Any]:
