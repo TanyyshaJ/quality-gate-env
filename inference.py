@@ -2,6 +2,8 @@ import asyncio
 import json
 import os
 import sys
+import traceback
+import urllib.request
 from typing import Any
 
 from openai import OpenAI
@@ -10,13 +12,17 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from quality_gate_env import QualityGateAction, QualityGateEnv  # noqa: E402
+try:
+    from quality_gate_env.models import QualityGateAction  # noqa: E402
+    from quality_gate_env.client import QualityGateEnv     # noqa: E402
+except ImportError:
+    from quality_gate_env import QualityGateAction, QualityGateEnv  # noqa: E402
 
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
 HF_TOKEN = os.getenv("HF_TOKEN")
-LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME") or os.getenv("IMAGE_NAME")
 ENV_BASE_URL = os.getenv("ENV_BASE_URL")
 BENCHMARK = "quality-gate-v1"
 TASK_IDS = ["easy_001", "medium_001", "hard_001"]
@@ -76,23 +82,37 @@ def _fallback_action(observation: Any) -> QualityGateAction:
 
 def get_model_action(client: OpenAI, observation: Any, history: list[str]) -> QualityGateAction:
     outputs_text = json.dumps(observation.outputs_to_review, indent=2)
+    budget_warning = (
+        "WARNING: Budget is 0. Do NOT use deep_verify. Use fast_pass, reject, flag_human, or sample_check only."
+        if observation.budget_remaining <= 0
+        else ""
+    )
+
     prompt = f"""You are a quality gate agent for AI-generated outputs.
 
 Budget remaining for deep checks: {observation.budget_remaining}
 Current step: {observation.step}
 Recent history: {history[-3:] if history else "None"}
+{budget_warning}
 
-Outputs:
+Outputs to review:
 {outputs_text}
 
 Allowed actions:
-- fast_pass
-- deep_verify (costs budget)
-- reject
-- flag_human
-- sample_check
+- fast_pass         → low risk, no issues
+- deep_verify       → costs 1 budget point, use for high/medium risk only if budget > 0
+- reject            → clearly bad output
+- flag_human        → uncertain, needs human review
+- sample_check      → light spot-check, no budget cost
 
-Respond with JSON only:
+Rules:
+- NEVER use deep_verify if budget_remaining is 0.
+- high risk   → reject or flag_human
+- medium risk → sample_check or flag_human
+- low risk    → fast_pass
+- Pick exactly ONE output_id from the list above.
+
+Respond with ONLY this JSON and nothing else:
 {{"output_id":"<id>","action_type":"<action>","reason":"<brief reason>"}}"""
 
     try:
@@ -101,15 +121,28 @@ Respond with JSON only:
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=180,
+            timeout=30,
         )
         text = (response.choices[0].message.content or "").strip()
         parsed = _safe_json_parse(text)
+
+        # Validate required fields
+        if not parsed.get("output_id") or not parsed.get("action_type"):
+            raise ValueError(f"Missing required fields in LLM response: {parsed}")
+
+        # Prevent deep_verify when budget is exhausted
+        if parsed["action_type"] == "deep_verify" and observation.budget_remaining <= 0:
+            parsed["action_type"] = "sample_check"
+            parsed["reason"] = "budget exhausted, downgraded from deep_verify"
+
         return QualityGateAction(
             output_id=parsed["output_id"],
             action_type=parsed["action_type"],
             reason=parsed.get("reason", "no reason"),
         )
-    except Exception:  # pragma: no cover
+
+    except Exception as e:
+        print(json.dumps({"type": "[WARN]", "msg": f"get_model_action failed: {e}, using fallback"}), flush=True)
         return _fallback_action(observation)
 
 
@@ -126,34 +159,59 @@ async def run_task(client: OpenAI, task_id: str) -> float:
     total_reward = 0.0
     steps = 0
     history: list[str] = []
+    action = None
 
-    env_client = await _create_env_client()
-    async with env_client as env:
-        result = await env.reset(task_id=task_id)
-        observation = result.observation
+    try:
+        env_client = await _create_env_client()
+    except Exception as e:
+        print(json.dumps({"type": "[ERROR]", "msg": f"Failed to create env client: {e}"}), flush=True)
+        traceback.print_exc()
+        raise
 
-        for step in range(1, MAX_STEPS + 1):
-            if result.done or observation.done:
-                break
+    try:
+        async with env_client as env:
+            try:
+                result = await env.reset(task_id=task_id)
+            except Exception as e:
+                print(json.dumps({"type": "[ERROR]", "msg": f"env.reset() failed for task {task_id}: {e}"}), flush=True)
+                traceback.print_exc()
+                raise
 
-            action = get_model_action(client, observation, history)
-            result = await env.step(action)
             observation = result.observation
-            reward = float(result.reward if result.reward is not None else observation.reward)
 
-            total_reward += reward
-            steps += 1
-            log_step(
-                step=step,
-                action={
-                    "output_id": action.output_id,
-                    "action_type": action.action_type,
-                    "reason": action.reason,
-                },
-                reward=reward,
-                done=observation.done,
-            )
-            history.append(f"step={step} action={action.action_type} reward={reward:.3f}")
+            for step in range(1, MAX_STEPS + 1):
+                if getattr(result, "done", False) or observation.done:
+                    break
+
+                try:
+                    action = get_model_action(client, observation, history)
+                    result = await env.step(action)
+                    observation = result.observation
+                    reward = float(result.reward if result.reward is not None else 0.0)
+
+                except Exception as e:
+                    print(json.dumps({"type": "[WARN]", "msg": f"Step {step} failed: {e}, skipping"}), flush=True)
+                    reward = 0.0
+                    if action is None:
+                        action = _fallback_action(observation)
+
+                total_reward += reward
+                steps += 1
+                log_step(
+                    step=step,
+                    action={
+                        "output_id": action.output_id,
+                        "action_type": action.action_type,
+                        "reason": action.reason,
+                    },
+                    reward=reward,
+                    done=observation.done,
+                )
+                history.append(f"step={step} action={action.action_type} reward={reward:.3f}")
+
+    except Exception as e:
+        print(json.dumps({"type": "[ERROR]", "msg": f"Task {task_id} crashed: {e}"}), flush=True)
+        traceback.print_exc()
 
     success = total_reward >= 0.5
     log_end(task=task_id, total_reward=total_reward, success=success, steps=steps)
@@ -164,10 +222,25 @@ async def main() -> None:
     if not HF_TOKEN:
         raise RuntimeError("Set HF_TOKEN before running inference.py")
 
+    # Health check — verify server is reachable before starting
+    if ENV_BASE_URL:
+        try:
+            urllib.request.urlopen(f"{ENV_BASE_URL}/health", timeout=5)
+            print(json.dumps({"type": "[INFO]", "msg": f"Server reachable at {ENV_BASE_URL}"}), flush=True)
+        except Exception as e:
+            raise RuntimeError(
+                f"Server not reachable at {ENV_BASE_URL}/health — is it running? Error: {e}"
+            )
+
     client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
     for task_id in TASK_IDS:
         await run_task(client, task_id)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        print(json.dumps({"type": "[FATAL]", "msg": str(e)}), flush=True)
+        traceback.print_exc()
+        sys.exit(1)
